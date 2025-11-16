@@ -4,7 +4,7 @@ Capablanca Chess engine
 =======
 <div align="center">
 
-  [![Stockfish][stockfish128-logo]][website-link]
+  <img src="Logo Capablanca chess engine.png" alt="Capablanca logo" width="128" />
 
   <h3>Capablanca Chess Engine</h3>
 
