@@ -34,8 +34,13 @@
 #include "types.h"
 #include "uci.h"
 #include "nnue/nnue_accumulator.h"
+#include "evalcache.h"
 
 namespace Stockfish {
+
+// CAPABLANCA ENHANCED: Global NNUE evaluation cache
+// Thread-safe through direct-mapped design (no locking needed)
+static EvalCache globalEvalCache;
 
 // Returns a static, purely materialistic evaluation of the position from
 // the point of view of the side to move. It can be divided by PawnValue to get
@@ -64,6 +69,13 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
 
     assert(!pos.checkers());
 
+    // CAPABLANCA ENHANCED: Check evaluation cache first
+    Value cachedEval;
+    Key posKey = pos.key();
+    if (globalEvalCache.probe(posKey, cachedEval) && optimism == 0) {
+        return cachedEval;
+    }
+
     bool smallNet           = use_smallnet(pos);
     auto [psqt, positional] = smallNet ? networks.small.evaluate(pos, accumulators, caches.small)
                                        : networks.big.evaluate(pos, accumulators, caches.big);
@@ -91,6 +103,11 @@ Value Eval::evaluate(const Eval::NNUE::Networks&    networks,
 
     // Guarantee evaluation does not hit the tablebase range
     v = std::clamp(v, VALUE_TB_LOSS_IN_MAX_PLY + 1, VALUE_TB_WIN_IN_MAX_PLY - 1);
+
+    // CAPABLANCA ENHANCED: Store in evaluation cache (only if optimism == 0)
+    if (optimism == 0) {
+        globalEvalCache.store(posKey, v);
+    }
 
     return v;
 }

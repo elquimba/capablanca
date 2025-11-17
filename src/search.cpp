@@ -49,6 +49,7 @@
 #include "types.h"
 #include "uci.h"
 #include "ucioption.h"
+#include "gamephase.h"
 
 namespace Stockfish {
 
@@ -331,8 +332,14 @@ void Search::Worker::iterative_deepening() {
             // Reset UCI info selDepth for each depth and each PV line
             selDepth = 0;
 
-            // Reset aspiration window starting size
-            delta     = 5 + threadIdx % 8 + std::abs(rootMoves[pvIdx].meanSquaredScore) / 9000;
+            // CAPABLANCA ENHANCED: Adaptive aspiration window based on game phase
+            GamePhase phase = detect_game_phase(rootPos);
+            PhaseParams params = get_phase_params(phase);
+
+            // Reset aspiration window starting size (phase-adaptive)
+            int baseDelta = 5 + threadIdx % 8 + std::abs(rootMoves[pvIdx].meanSquaredScore) / 9000;
+            delta = (baseDelta * params.aspirationDeltaMult) / 128;
+
             Value avg = rootMoves[pvIdx].averageScore;
             alpha     = std::max(avg - delta, -VALUE_INFINITE);
             beta      = std::min(avg + delta, VALUE_INFINITE);
@@ -636,6 +643,10 @@ Value Search::Worker::search(
     SearchedList capturesSearched;
     SearchedList quietsSearched;
 
+    // CAPABLANCA ENHANCED: Detect game phase for adaptive search
+    GamePhase phase = detect_game_phase(pos);
+    PhaseParams phaseParams = get_phase_params(phase);
+
     // Step 1. Initialize node
     ss->inCheck   = pos.checkers();
     priorCapture  = pos.captured_piece();
@@ -856,22 +867,22 @@ Value Search::Worker::search(
     if (!PvNode && eval < alpha - 514 - 294 * depth * depth)
         return qsearch<NonPV>(pos, ss, alpha, beta);
 
-    // Step 8. Futility pruning: child node (OPTIMIZED - Adaptive)
+    // Step 8. Futility pruning: child node (CAPABLANCA ENHANCED - Phase & Position Adaptive)
     // The depth condition is important for mate finding.
     {
         auto futility_margin = [&](Depth d) {
             Value futilityMult = 91 - 21 * !ss->ttHit;
 
-            // Adaptive multiplier based on position type
-            int adaptiveFactor = 1024;
+            // CAPABLANCA: Start with phase-specific base factor
+            int adaptiveFactor = phaseParams.futilityFactor;
 
-            // Be more conservative in tactical positions
+            // Further adjust based on tactical characteristics
             if (ss->inCheck || pos.count<ALL_PIECES>() <= 10)
-                adaptiveFactor = 1150;  // +12% margin
+                adaptiveFactor = (adaptiveFactor * 1150) / 1024;  // +12% more conservative
 
-            // Be more aggressive in quiet positions
+            // More aggressive in quiet improving positions
             else if (!priorCapture && improving && depth > 5)
-                adaptiveFactor = 900;   // -12% margin
+                adaptiveFactor = (adaptiveFactor * 900) / 1024;   // -12% more aggressive
 
             return futilityMult * d * adaptiveFactor / 1024            //
                  - 2094 * improving * futilityMult / 1024         //
@@ -884,14 +895,14 @@ Value Search::Worker::search(
             return (2 * beta + eval) / 3;
     }
 
-    // Step 9. Null move search with verification search
+    // Step 9. Null move search with verification search (CAPABLANCA: Phase-adaptive)
     if (cutNode && ss->staticEval >= beta - 18 * depth + 390 && !excludedMove
         && pos.non_pawn_material(us) && ss->ply >= nmpMinPly && !is_loss(beta))
     {
         assert((ss - 1)->currentMove != Move::null());
 
-        // Null move dynamic reduction based on depth
-        Depth R = 7 + depth / 3;
+        // CAPABLANCA: Phase-adaptive null move reduction
+        Depth R = phaseParams.nullMoveReductionBase + depth / 3;
         do_null_move(pos, st, ss);
 
         Value nullValue = -search<NonPV>(pos, ss + 1, -beta, -beta + 1, depth - R, false);
@@ -1121,12 +1132,16 @@ moves_loop:  // When in check, search starts here
 
         // (*Scaler) Generally, higher singularBeta (i.e closer to ttValue)
         // and lower extension margins scale well.
+        // CAPABLANCA: Phase-adaptive singular extension depth
 
-        if (!rootNode && move == ttData.move && !excludedMove && depth >= 6 + ss->ttPv
+        if (!rootNode && move == ttData.move && !excludedMove
+            && depth >= phaseParams.singularExtensionDepth + ss->ttPv
             && is_valid(ttData.value) && !is_decisive(ttData.value) && (ttData.bound & BOUND_LOWER)
             && ttData.depth >= depth - 3)
         {
-            Value singularBeta  = ttData.value - (56 + 81 * (ss->ttPv && !PvNode)) * depth / 60;
+            // CAPABLANCA: Wider margin in middlegame for more extensions
+            int marginMult = (phase == MIDDLEGAME) ? 50 : 56;
+            Value singularBeta  = ttData.value - (marginMult + 81 * (ss->ttPv && !PvNode)) * depth / 60;
             Depth singularDepth = newDepth / 2;
 
             ss->excludedMove = move;
@@ -1176,6 +1191,12 @@ moves_loop:  // When in check, search starts here
                 extension = -2;
         }
 
+        // CAPABLANCA: Additional tactical extension in middlegame
+        if (phase == MIDDLEGAME && depth >= 8 && (givesCheck || ss->inCheck)) {
+            // Extend checks in middlegame for better tactical play
+            extension += 1;
+        }
+
         // Step 16. Make the move
         do_move(pos, move, st, givesCheck, ss);
 
@@ -1191,6 +1212,10 @@ moves_loop:  // When in check, search starts here
         // These reduction adjustments have no proven non-linear scaling
 
         r += 843;  // Base reduction offset to compensate for other tweaks
+
+        // CAPABLANCA: Phase-adaptive LMR extra reduction
+        if (phaseParams.lmrExtraReduction > 0 && moveCount > 6)
+            r += phaseParams.lmrExtraReduction * depth / 4;
         r -= moveCount * 66;
         r -= std::abs(correctionValue) / 30450;
 

@@ -188,6 +188,13 @@ constexpr bool is_loss(Value value) {
 
 constexpr bool is_decisive(Value value) { return is_win(value) || is_loss(value); }
 
+// CAPABLANCA ENHANCED: Game phase detection for adaptive search
+enum GamePhase : int8_t {
+    OPENING,
+    MIDDLEGAME,
+    ENDGAME
+};
+
 // In the code, we make the assumption that these values
 // are such that non_pawn_material() can be used to uniquely
 // identify the material on the board.
